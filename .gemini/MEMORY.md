@@ -36,6 +36,13 @@
 6. **Unit tests** required — CI runs pytest + linting on every PR
 7. **Squash-merge** PRs for clean history
 
+## Guiding Principles
+- **No regressions** — never break what's working
+- **No willy-nilly deletions** — do not remove code/files without clear justification
+- **No oversimplification** — keep the full richness of the implementation
+- **Strict process** — feature branch → PR → Gemini review → green checks → merge
+- **No shortcuts** — every step matters
+
 ## Integration Approaches (priority order)
 1. **Approach A**: CLI wrapper proxy (most reliable, `antigravity chat` is documented)
 2. **Approach B**: Direct extension server (fragile, CSRF token rotation)

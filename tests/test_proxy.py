@@ -279,7 +279,7 @@ class TestProxyEndpoints(unittest.TestCase):
         except urllib.error.HTTPError as e:
             self.assertEqual(e.code, 400)
 
-    @patch("antigravity_proxy.call_antigravity_cli")
+    @patch("antigravity_proxy.call_backend")
     def test_post_sync_success(self, mock_cli):
         """POST returns successful completion."""
         mock_cli.return_value = "Test response"
@@ -296,7 +296,7 @@ class TestProxyEndpoints(unittest.TestCase):
         content = data["choices"][0]["message"]["content"]
         self.assertEqual(content, "Test response")
 
-    @patch("antigravity_proxy.call_antigravity_cli")
+    @patch("antigravity_proxy.call_backend")
     def test_post_cli_error_returns_502(self, mock_cli):
         """POST returns 502 when CLI fails."""
         mock_cli.return_value = "Error: CLI crashed"

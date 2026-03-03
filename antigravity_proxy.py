@@ -2,11 +2,13 @@
 """
 Antigravity -> OpenAI-compatible proxy server.
 
-Wraps the 'antigravity chat' CLI to expose Claude Opus 4.6
-as an OpenAI-compatible API that OpenCode can consume.
+Exposes Google AI Ultra models as an OpenAI-compatible API
+that OpenCode can consume. Supports multiple backends:
+  - gemini: Google Gemini CLI (non-interactive, -p flag)
+  - antigravity: Antigravity chat CLI (opens GUI)
 
 Usage:
-    python3 antigravity_proxy.py [--port 8462]
+    python3 antigravity_proxy.py [--port 8462] [--backend gemini]
 
 Then configure OpenCode to use http://localhost:8462/v1
 """
@@ -20,15 +22,20 @@ import re
 import argparse
 import logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import shutil
 
 ANTIGRAVITY_CLI = os.path.expanduser(
     "~/.antigravity/antigravity/bin/antigravity"
 )
+GEMINI_CLI = shutil.which("gemini")
 DEFAULT_PORT = 8462
 MODEL_NAME = "claude-opus-4-6"
 MODEL_DISPLAY = (
-    "Claude Opus 4.6 (via Antigravity / Google AI Ultra)"
+    "Claude Opus 4.6 (via Google AI Ultra)"
 )
+
+# Active backend — set during startup
+ACTIVE_BACKEND = "gemini"  # or "antigravity"
 
 # Configure logging
 logging.basicConfig(
@@ -101,6 +108,69 @@ def find_extension_servers() -> list:
     return servers
 
 
+def call_gemini_cli(prompt: str) -> str:
+    """Call Gemini CLI non-interactively and return response.
+
+    Uses 'gemini -p <prompt>' which works headlessly
+    with cached Google AI Ultra credentials.
+
+    Args:
+        prompt: The prompt to send.
+
+    Returns:
+        The CLI response text, or an error message.
+    """
+    cmd = [GEMINI_CLI, "-p", prompt]
+    logger.info(
+        "Calling Gemini CLI: prompt=%d chars",
+        len(prompt),
+    )
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env={**os.environ, "NO_COLOR": "1"},
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            output = result.stdout.strip()
+            # Strip "Loaded cached credentials." prefix
+            lines = output.split("\n")
+            clean_lines = [
+                line for line in lines
+                if not line.startswith(
+                    "Loaded cached credentials"
+                )
+            ]
+            cleaned = "\n".join(clean_lines).strip()
+            if cleaned:
+                logger.info(
+                    "Gemini CLI returned %d chars",
+                    len(cleaned),
+                )
+                return cleaned
+            logger.warning("Gemini CLI returned no content")
+            return "Error: No content from Gemini CLI"
+        if result.stderr.strip():
+            err = result.stderr.strip()[:200]
+            logger.error("Gemini CLI error: %s", err)
+            return f"Error: {err}"
+        logger.warning("Gemini CLI returned no output")
+        return "Error: No output from Gemini CLI"
+    except subprocess.TimeoutExpired:
+        logger.error("Gemini CLI timed out after 120s")
+        return "Error: Gemini CLI timed out"
+    except FileNotFoundError:
+        logger.error(
+            "Gemini CLI not found at %s", GEMINI_CLI
+        )
+        return "Error: Gemini CLI not found"
+    except OSError as e:
+        logger.error("Gemini CLI OS error: %s", e)
+        return f"Error: {e}"
+
+
 def call_antigravity_cli(
     prompt: str, mode: str = "ask"
 ) -> str:
@@ -145,6 +215,23 @@ def call_antigravity_cli(
     except OSError as e:
         logger.error("CLI OS error: %s", e)
         return f"Error: {e}"
+
+
+def call_backend(prompt: str) -> str:
+    """Call the active backend CLI.
+
+    Routes to Gemini CLI or Antigravity CLI based
+    on the ACTIVE_BACKEND setting.
+
+    Args:
+        prompt: The prompt to send.
+
+    Returns:
+        The backend response text, or an error message.
+    """
+    if ACTIVE_BACKEND == "gemini":
+        return call_gemini_cli(prompt)
+    return call_antigravity_cli(prompt)
 
 
 class AntigravityProxy(BaseHTTPRequestHandler):
@@ -291,7 +378,7 @@ class AntigravityProxy(BaseHTTPRequestHandler):
         Args:
             prompt: The formatted prompt.
         """
-        response_text = call_antigravity_cli(prompt)
+        response_text = call_backend(prompt)
 
         # Check for CLI errors
         if response_text.startswith("Error:"):
@@ -346,7 +433,7 @@ class AntigravityProxy(BaseHTTPRequestHandler):
         self._send_cors_headers()
         self.end_headers()
 
-        response_text = call_antigravity_cli(prompt)
+        response_text = call_backend(prompt)
         cid = f"chatcmpl-{uuid.uuid4().hex[:8]}"
 
         # Send role chunk
@@ -440,6 +527,8 @@ class AntigravityProxy(BaseHTTPRequestHandler):
 
 def main() -> None:
     """Start the Antigravity proxy server."""
+    global ACTIVE_BACKEND
+
     parser = argparse.ArgumentParser(
         description="Antigravity -> OpenAI proxy"
     )
@@ -451,14 +540,61 @@ def main() -> None:
         "--host", type=str, default="localhost",
         help="Host to bind to (default: localhost)",
     )
+    parser.add_argument(
+        "--backend", type=str, default="auto",
+        choices=["gemini", "antigravity", "auto"],
+        help=(
+            "Backend CLI to use "
+            "(default: auto-detect)"
+        ),
+    )
     args = parser.parse_args()
 
-    if not os.path.exists(ANTIGRAVITY_CLI):
-        logger.error(
-            "Antigravity CLI not found at %s",
-            ANTIGRAVITY_CLI,
+    # Backend availability map
+    backends = {
+        "gemini": {
+            "ok": bool(
+                GEMINI_CLI
+                and os.path.exists(GEMINI_CLI)
+            ),
+            "cli": GEMINI_CLI,
+        },
+        "antigravity": {
+            "ok": os.path.exists(ANTIGRAVITY_CLI),
+            "cli": ANTIGRAVITY_CLI,
+        },
+    }
+
+    # Select backend
+    if args.backend == "auto":
+        chosen = next(
+            (
+                name for name, info
+                in backends.items() if info["ok"]
+            ),
+            None,
         )
-        sys.exit(1)
+        if not chosen:
+            logger.error(
+                "No backend CLI found. Install "
+                "@google/gemini-cli or Antigravity."
+            )
+            sys.exit(1)
+        ACTIVE_BACKEND = chosen
+    else:
+        info = backends[args.backend]
+        if not info["ok"]:
+            logger.error(
+                "%s CLI not found at %s",
+                args.backend, info["cli"],
+            )
+            sys.exit(1)
+        ACTIVE_BACKEND = args.backend
+
+    cli_path = backends[ACTIVE_BACKEND]["cli"]
+    logger.info(
+        "Backend: %s (%s)", ACTIVE_BACKEND, cli_path,
+    )
 
     # Check for running extension servers
     servers = find_extension_servers()
@@ -486,7 +622,6 @@ def main() -> None:
     logger.info("  /v1/models")
     logger.info("  /v1/chat/completions")
     logger.info("  /health")
-    logger.info("CLI: %s", ANTIGRAVITY_CLI)
     logger.info("Model: %s", MODEL_NAME)
 
     # Print OpenCode config
