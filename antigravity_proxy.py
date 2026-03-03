@@ -20,12 +20,15 @@ import re
 import argparse
 import logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from typing import Optional
 
-ANTIGRAVITY_CLI = os.path.expanduser("~/.antigravity/antigravity/bin/antigravity")
+ANTIGRAVITY_CLI = os.path.expanduser(
+    "~/.antigravity/antigravity/bin/antigravity"
+)
 DEFAULT_PORT = 8462
 MODEL_NAME = "claude-opus-4-6"
-MODEL_DISPLAY = "Claude Opus 4.6 (via Antigravity / Google AI Ultra)"
+MODEL_DISPLAY = (
+    "Claude Opus 4.6 (via Antigravity / Google AI Ultra)"
+)
 
 # Configure logging
 logging.basicConfig(
@@ -37,9 +40,10 @@ logger = logging.getLogger("antigravity-proxy")
 
 
 def find_extension_servers() -> list:
-    """Discover running Antigravity extension servers from process list.
+    """Discover running Antigravity extension servers.
 
-    Extracts CSRF tokens and ports from language_server processes.
+    Extracts CSRF tokens and ports from language_server
+    processes.
 
     Returns:
         List of dicts with server connection info.
@@ -47,44 +51,73 @@ def find_extension_servers() -> list:
     servers = []
     try:
         result = subprocess.run(
-            ["ps", "aux"], capture_output=True, text=True, timeout=5
+            ["ps", "aux"],
+            capture_output=True, text=True, timeout=5,
         )
-        for line in result.stdout.split("\n"):
-            if "language_server" in line and "extension_server_port" in line:
-                port_match = re.search(
-                    r"--extension_server_port\s+(\d+)", line
-                )
-                csrf_match = re.search(r"--csrf_token\s+(\S+)", line)
-                ext_csrf_match = re.search(
-                    r"--extension_server_csrf_token\s+(\S+)", line
-                )
-                ws_match = re.search(r"--workspace_id\s+(\S+)", line)
-                servers.append({
-                    "port": port_match.group(1) if port_match else None,
-                    "csrf": csrf_match.group(1) if csrf_match else None,
-                    "ext_csrf": (
-                        ext_csrf_match.group(1) if ext_csrf_match else None
-                    ),
-                    "workspace": ws_match.group(1) if ws_match else None,
-                })
-    except Exception as e:
-        logger.warning("Could not discover extension servers: %s", e)
+    except subprocess.TimeoutExpired:
+        logger.warning("ps aux timed out")
+        return servers
+    except OSError as e:
+        logger.warning("Could not run ps: %s", e)
+        return servers
+
+    for line in result.stdout.split("\n"):
+        if "language_server" not in line:
+            continue
+        if "extension_server_port" not in line:
+            continue
+
+        port_match = re.search(
+            r"--extension_server_port\s+(\d+)", line
+        )
+        csrf_match = re.search(
+            r"--csrf_token\s+(\S+)", line
+        )
+        ext_csrf_match = re.search(
+            r"--extension_server_csrf_token\s+(\S+)",
+            line,
+        )
+        ws_match = re.search(
+            r"--workspace_id\s+(\S+)", line
+        )
+        servers.append({
+            "port": (
+                port_match.group(1)
+                if port_match else None
+            ),
+            "csrf": (
+                csrf_match.group(1)
+                if csrf_match else None
+            ),
+            "ext_csrf": (
+                ext_csrf_match.group(1)
+                if ext_csrf_match else None
+            ),
+            "workspace": (
+                ws_match.group(1)
+                if ws_match else None
+            ),
+        })
     return servers
 
 
-def call_antigravity_cli(prompt: str, mode: str = "ask") -> str:
+def call_antigravity_cli(
+    prompt: str, mode: str = "ask"
+) -> str:
     """Call antigravity chat CLI and return the response.
 
     Args:
         prompt: The prompt to send.
-        mode: Chat mode (ask, edit, agent). Defaults to 'ask'.
+        mode: Chat mode (ask, edit, agent).
 
     Returns:
         The CLI response text, or an error message.
     """
     cmd = [ANTIGRAVITY_CLI, "chat", "-m", mode, prompt]
-    logger.info("Calling CLI: antigravity chat -m %s (prompt: %d chars)",
-                mode, len(prompt))
+    logger.info(
+        "Calling CLI: mode=%s, prompt=%d chars",
+        mode, len(prompt),
+    )
     try:
         result = subprocess.run(
             cmd,
@@ -94,48 +127,50 @@ def call_antigravity_cli(prompt: str, mode: str = "ask") -> str:
             env={**os.environ, "NO_COLOR": "1"},
         )
         if result.returncode == 0 and result.stdout.strip():
-            logger.info("CLI returned %d chars", len(result.stdout.strip()))
-            return result.stdout.strip()
-        elif result.stderr.strip():
-            logger.error("CLI error: %s", result.stderr.strip()[:200])
-            return f"Error: {result.stderr.strip()}"
-        else:
-            logger.warning("CLI returned no output")
-            return "Error: No output from antigravity chat"
+            output = result.stdout.strip()
+            logger.info("CLI returned %d chars", len(output))
+            return output
+        if result.stderr.strip():
+            err = result.stderr.strip()[:200]
+            logger.error("CLI error: %s", err)
+            return f"Error: {err}"
+        logger.warning("CLI returned no output")
+        return "Error: No output from antigravity chat"
     except subprocess.TimeoutExpired:
         logger.error("CLI timed out after 120s")
-        return "Error: antigravity chat timed out after 120s"
-    except Exception as e:
-        logger.error("CLI exception: %s", e)
-        return f"Error: {str(e)}"
+        return "Error: antigravity chat timed out"
+    except FileNotFoundError:
+        logger.error("CLI not found at %s", ANTIGRAVITY_CLI)
+        return "Error: antigravity CLI not found"
+    except OSError as e:
+        logger.error("CLI OS error: %s", e)
+        return f"Error: {e}"
 
 
 class AntigravityProxy(BaseHTTPRequestHandler):
-    """HTTP handler that translates OpenAI API calls to antigravity chat CLI."""
+    """HTTP handler translating OpenAI API to CLI."""
 
     def do_GET(self) -> None:
-        """Handle GET requests — models and health endpoints."""
+        """Handle GET requests."""
         if self.path == "/v1/models":
             self._respond_json(200, {
                 "object": "list",
-                "data": [
-                    {
-                        "id": MODEL_NAME,
-                        "object": "model",
-                        "created": int(time.time()),
-                        "owned_by": "antigravity-google-ai-ultra",
-                        "permission": [],
-                        "root": MODEL_NAME,
-                        "parent": None,
-                    }
-                ],
+                "data": [{
+                    "id": MODEL_NAME,
+                    "object": "model",
+                    "created": int(time.time()),
+                    "owned_by": "antigravity-ultra",
+                    "permission": [],
+                    "root": MODEL_NAME,
+                    "parent": None,
+                }],
             })
         elif self.path == "/health":
-            # Check if Antigravity is running
             servers = find_extension_servers()
+            cli_exists = os.path.exists(ANTIGRAVITY_CLI)
             self._respond_json(200, {
                 "status": "ok",
-                "antigravity_cli": os.path.exists(ANTIGRAVITY_CLI),
+                "antigravity_cli": cli_exists,
                 "extension_servers": len(servers),
                 "model": MODEL_NAME,
             })
@@ -159,35 +194,38 @@ class AntigravityProxy(BaseHTTPRequestHandler):
             self._respond_json(404, {"error": "not found"})
             return
 
-        # Parse request body
-        content_length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(content_length))
-
+        length = int(
+            self.headers.get("Content-Length", 0)
+        )
+        body = json.loads(self.rfile.read(length))
         messages = body.get("messages", [])
         stream = body.get("stream", False)
-
-        # Build the prompt from messages
         prompt = self._messages_to_prompt(messages)
 
         if stream:
-            self._handle_streaming(prompt, body)
+            self._handle_streaming(prompt)
         else:
-            self._handle_sync(prompt, body)
+            self._handle_sync(prompt)
 
     def do_OPTIONS(self) -> None:
         """Handle CORS preflight requests."""
         self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers",
-                         "Content-Type, Authorization")
+        self._send_cors_headers()
+        self.send_header(
+            "Access-Control-Allow-Methods",
+            "GET, POST, OPTIONS",
+        )
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Content-Type, Authorization",
+        )
         self.end_headers()
 
     def _messages_to_prompt(self, messages: list) -> str:
-        """Convert OpenAI messages format to a single prompt string.
+        """Convert OpenAI messages to a prompt string.
 
         Args:
-            messages: List of message dicts with role and content.
+            messages: List of message dicts.
 
         Returns:
             Formatted prompt string.
@@ -197,129 +235,123 @@ class AntigravityProxy(BaseHTTPRequestHandler):
             role = msg.get("role", "user")
             content = msg.get("content", "")
             if isinstance(content, list):
-                # Handle content array (multimodal)
                 content = " ".join(
-                    part.get("text", "") for part in content
-                    if part.get("type") == "text"
+                    p.get("text", "") for p in content
+                    if p.get("type") == "text"
                 )
             if role == "system":
-                parts.append(f"[System instruction: {content}]")
+                parts.append(
+                    f"[System instruction: {content}]"
+                )
             elif role == "user":
                 parts.append(content)
             elif role == "assistant":
-                parts.append(f"[Previous assistant response: {content}]")
+                parts.append(
+                    f"[Previous response: {content}]"
+                )
         return "\n\n".join(parts)
 
-    def _handle_sync(self, prompt: str, body: dict) -> None:
+    def _handle_sync(self, prompt: str) -> None:
         """Handle non-streaming chat completion.
 
         Args:
             prompt: The formatted prompt.
-            body: The original request body.
         """
         response_text = call_antigravity_cli(prompt)
+        prompt_tokens = len(prompt.split())
+        completion_tokens = len(response_text.split())
         self._respond_json(200, {
             "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
             "object": "chat.completion",
             "created": int(time.time()),
             "model": MODEL_NAME,
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": response_text,
-                    },
-                    "finish_reason": "stop",
-                }
-            ],
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": response_text,
+                },
+                "finish_reason": "stop",
+            }],
             "usage": {
-                "prompt_tokens": len(prompt.split()),
-                "completion_tokens": len(response_text.split()),
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
                 "total_tokens": (
-                    len(prompt.split()) + len(response_text.split())
+                    prompt_tokens + completion_tokens
                 ),
             },
         })
 
-    def _handle_streaming(self, prompt: str, body: dict) -> None:
+    def _handle_streaming(self, prompt: str) -> None:
         """Handle streaming chat completion (SSE).
 
-        Note: Since the CLI returns all output at once, we simulate
-        streaming by splitting the response into word-sized chunks.
+        Since the CLI returns all output at once, we
+        simulate streaming by splitting into chunks.
 
         Args:
             prompt: The formatted prompt.
-            body: The original request body.
         """
         self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
+        self.send_header(
+            "Content-Type", "text/event-stream"
+        )
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors_headers()
         self.end_headers()
 
         response_text = call_antigravity_cli(prompt)
-        completion_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+        cid = f"chatcmpl-{uuid.uuid4().hex[:8]}"
 
-        # Send role chunk first
-        role_chunk = {
-            "id": completion_id,
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": MODEL_NAME,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {"role": "assistant"},
-                    "finish_reason": None,
-                }
-            ],
-        }
-        self.wfile.write(
-            f"data: {json.dumps(role_chunk)}\n\n".encode()
-        )
-        self.wfile.flush()
+        # Send role chunk
+        self._send_sse_chunk(cid, {
+            "role": "assistant",
+        }, None)
 
-        # Stream the response in chunks (simulate streaming)
+        # Stream word by word
         words = response_text.split(" ")
         for i, word in enumerate(words):
-            chunk_text = word + (" " if i < len(words) - 1 else "")
-            chunk = {
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": MODEL_NAME,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"content": chunk_text},
-                        "finish_reason": None,
-                    }
-                ],
-            }
-            self.wfile.write(
-                f"data: {json.dumps(chunk)}\n\n".encode()
+            suffix = " " if i < len(words) - 1 else ""
+            self._send_sse_chunk(
+                cid, {"content": word + suffix}, None
             )
-            self.wfile.flush()
 
         # Send final chunk
-        final_chunk = {
-            "id": completion_id,
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": MODEL_NAME,
-            "choices": [
-                {"index": 0, "delta": {}, "finish_reason": "stop"}
-            ],
-        }
-        self.wfile.write(
-            f"data: {json.dumps(final_chunk)}\n\n".encode()
-        )
+        self._send_sse_chunk(cid, {}, "stop")
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
 
-    def _respond_json(self, status: int, data: dict) -> None:
+    def _send_sse_chunk(
+        self,
+        completion_id: str,
+        delta: dict,
+        finish_reason,
+    ) -> None:
+        """Send a single SSE chunk.
+
+        Args:
+            completion_id: The completion ID.
+            delta: The delta content.
+            finish_reason: Finish reason or None.
+        """
+        chunk = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": MODEL_NAME,
+            "choices": [{
+                "index": 0,
+                "delta": delta,
+                "finish_reason": finish_reason,
+            }],
+        }
+        data = json.dumps(chunk)
+        self.wfile.write(f"data: {data}\n\n".encode())
+        self.wfile.flush()
+
+    def _respond_json(
+        self, status: int, data: dict
+    ) -> None:
         """Send a JSON response.
 
         Args:
@@ -328,73 +360,111 @@ class AntigravityProxy(BaseHTTPRequestHandler):
         """
         body = json.dumps(data).encode()
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header(
+            "Content-Type", "application/json"
+        )
+        self.send_header(
+            "Content-Length", str(len(body))
+        )
+        self._send_cors_headers()
         self.end_headers()
         self.wfile.write(body)
 
-    def log_message(self, format: str, *args) -> None:
-        """Custom logging to use our logger."""
-        logger.info("%s %s", self.client_address[0], args[0])
+    def _send_cors_headers(self) -> None:
+        """Add CORS headers to the response."""
+        self.send_header(
+            "Access-Control-Allow-Origin", "*"
+        )
+
+    def log_message(
+        self, format_str: str, *args
+    ) -> None:
+        """Custom logging using our logger.
+
+        Args:
+            format_str: Log format string (unused).
+            args: Log arguments.
+        """
+        if args:
+            logger.info(
+                "%s %s",
+                self.client_address[0], args[0],
+            )
 
 
 def main() -> None:
     """Start the Antigravity proxy server."""
     parser = argparse.ArgumentParser(
-        description="Antigravity -> OpenAI-compatible proxy"
+        description="Antigravity -> OpenAI proxy"
     )
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT,
-                        help=f"Port to listen on (default: {DEFAULT_PORT})")
-    parser.add_argument("--host", type=str, default="localhost",
-                        help="Host to bind to (default: localhost)")
+    parser.add_argument(
+        "--port", type=int, default=DEFAULT_PORT,
+        help=f"Port (default: {DEFAULT_PORT})",
+    )
+    parser.add_argument(
+        "--host", type=str, default="localhost",
+        help="Host to bind to (default: localhost)",
+    )
     args = parser.parse_args()
 
-    # Verify antigravity CLI exists
     if not os.path.exists(ANTIGRAVITY_CLI):
-        logger.error("Antigravity CLI not found at %s", ANTIGRAVITY_CLI)
+        logger.error(
+            "Antigravity CLI not found at %s",
+            ANTIGRAVITY_CLI,
+        )
         sys.exit(1)
 
     # Check for running extension servers
     servers = find_extension_servers()
     if servers:
-        logger.info("Found %d Antigravity extension server(s)", len(servers))
+        logger.info(
+            "Found %d extension server(s)",
+            len(servers),
+        )
         for s in servers:
-            logger.info("  workspace=%s port=%s",
-                        s.get("workspace"), s.get("port"))
+            logger.info(
+                "  workspace=%s port=%s",
+                s.get("workspace"), s.get("port"),
+            )
     else:
-        logger.warning("No Antigravity extension servers found. "
-                       "Is Antigravity running?")
+        logger.warning(
+            "No extension servers found. "
+            "Is Antigravity running?"
+        )
 
-    server = HTTPServer((args.host, args.port), AntigravityProxy)
-    logger.info("Antigravity proxy listening on http://%s:%d",
-                args.host, args.port)
-    logger.info("  /v1/models          - List available models")
-    logger.info("  /v1/chat/completions - Chat completions (sync + streaming)")
-    logger.info("  /health             - Health check")
-    logger.info("Using CLI: %s", ANTIGRAVITY_CLI)
+    server = HTTPServer(
+        (args.host, args.port), AntigravityProxy
+    )
+    base_url = f"http://{args.host}:{args.port}"
+    logger.info("Proxy listening on %s", base_url)
+    logger.info("  /v1/models")
+    logger.info("  /v1/chat/completions")
+    logger.info("  /health")
+    logger.info("CLI: %s", ANTIGRAVITY_CLI)
     logger.info("Model: %s", MODEL_NAME)
 
-    # Print OpenCode config snippet
+    # Print OpenCode config
     config = {
         "provider": {
             "antigravity": {
                 "npm": "@ai-sdk/openai-compatible",
                 "name": MODEL_DISPLAY,
                 "options": {
-                    "baseURL": f"http://{args.host}:{args.port}/v1",
+                    "baseURL": f"{base_url}/v1",
                     "apiKey": "not-needed",
                 },
                 "models": {
                     MODEL_NAME: {
                         "name": MODEL_DISPLAY,
-                    }
+                    },
                 },
-            }
-        }
+            },
+        },
     }
-    logger.info("OpenCode provider config:\n%s",
-                json.dumps(config, indent=2))
+    logger.info(
+        "OpenCode config:\n%s",
+        json.dumps(config, indent=2),
+    )
 
     try:
         server.serve_forever()

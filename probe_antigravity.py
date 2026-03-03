@@ -12,7 +12,15 @@ import time
 import os
 import re
 
-ANTIGRAVITY_CLI = os.path.expanduser("~/.antigravity/antigravity/bin/antigravity")
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
+
+ANTIGRAVITY_CLI = os.path.expanduser(
+    "~/.antigravity/antigravity/bin/antigravity"
+)
 
 
 def banner(msg: str) -> None:
@@ -40,36 +48,53 @@ def probe_cli() -> dict:
         )
         print(f"  Exit code: {result.returncode}")
         print(f"  Stdout: {result.stdout[:500]}")
+        has_modes = (
+            "-m" in result.stdout or "--mode" in result.stdout
+        )
         results["chat_help"] = {
             "exit_code": result.returncode,
-            "has_modes": "-m" in result.stdout or "--mode" in result.stdout,
+            "has_modes": has_modes,
             "modes": [],
         }
         # Extract available modes
         for line in result.stdout.split("\n"):
-            if "ask" in line.lower() or "edit" in line.lower() or "agent" in line.lower():
-                results["chat_help"]["modes"].append(line.strip())
-    except Exception as e:
-        print(f"  Error: {e}")
+            lower = line.lower()
+            if "ask" in lower or "edit" in lower:
+                results["chat_help"]["modes"].append(
+                    line.strip()
+                )
+    except subprocess.TimeoutExpired:
+        print("  TIMEOUT - command did not return in 10s")
+        results["chat_help"] = {"error": "timeout"}
+    except FileNotFoundError:
+        print("  CLI binary not found")
+        results["chat_help"] = {"error": "not found"}
+    except OSError as e:
+        print(f"  OS error: {e}")
         results["chat_help"] = {"error": str(e)}
 
     # Test 2: Main help for server/api/headless keywords
-    print("\n[2/3] Testing: antigravity --help (interesting keywords)")
+    print("\n[2/3] Testing: antigravity --help")
     try:
         result = subprocess.run(
             [ANTIGRAVITY_CLI, "--help"],
             capture_output=True, text=True, timeout=10
         )
-        keywords = ["serve", "server", "api", "headless", "pipe", "tunnel", "proxy"]
+        keywords = [
+            "serve", "server", "api",
+            "headless", "pipe", "tunnel", "proxy",
+        ]
         interesting = []
         for line in result.stdout.split("\n"):
             if any(kw in line.lower() for kw in keywords):
                 interesting.append(line.strip())
                 print(f"  INTERESTING: {line.strip()}")
-        results["main_help"] = {"interesting_lines": interesting}
+        results["main_help"] = {
+            "interesting_lines": interesting,
+        }
         if not interesting:
             print("  No server/API/headless keywords found")
-    except Exception as e:
+    except (subprocess.TimeoutExpired, OSError) as e:
         print(f"  Error: {e}")
         results["main_help"] = {"error": str(e)}
 
@@ -83,14 +108,14 @@ def probe_cli() -> dict:
         version = result.stdout.strip()
         print(f"  Version: {version}")
         results["version"] = version
-    except Exception as e:
+    except (subprocess.TimeoutExpired, OSError) as e:
         results["version"] = str(e)
 
     return results
 
 
 def probe_ports() -> dict:
-    """Probe known Antigravity ports for undiscovered endpoints.
+    """Probe known Antigravity ports for endpoints.
 
     Returns:
         dict with port probe results.
@@ -109,42 +134,57 @@ def probe_ports() -> dict:
         for line in result.stdout.split("\n"):
             if "Antigravi" in line and "LISTEN" in line:
                 parts = line.split(":")
-                port_str = parts[-1].split()[0] if parts else None
+                port_str = parts[-1].split()[0]
                 if port_str and port_str.isdigit():
                     ports.add(int(port_str))
-                    print(f"  Found listening port: {port_str}")
+                    print(f"  Found port: {port_str}")
         results["listening_ports"] = sorted(ports)
-    except Exception as e:
+    except (subprocess.TimeoutExpired, OSError) as e:
         print(f"  Error: {e}")
         results["listening_ports"] = []
 
+    if not HAS_REQUESTS:
+        print("  requests library not available")
+        return results
+
     # Probe each port with common endpoints
-    try:
-        import requests
-        for port in sorted(results.get("listening_ports", [])):
-            port_results = {}
-            print(f"\n[2/2] Probing port {port}...")
-            endpoints = ["/v1/models", "/v1/chat/completions", "/api/models", "/", "/health"]
-            for ep in endpoints:
-                try:
-                    r = requests.get(f"http://localhost:{port}{ep}", timeout=3)
-                    if r.status_code != 404:
-                        print(f"  GET {ep} -> {r.status_code}: {r.text[:100]}")
-                        port_results[f"GET {ep}"] = {
-                            "status": r.status_code,
-                            "body": r.text[:200],
-                        }
-                except Exception:
-                    pass
-            results[f"port_{port}"] = port_results
-    except ImportError:
-        print("  requests library not available, skipping HTTP probes")
+    for port in sorted(results.get("listening_ports", [])):
+        port_results = {}
+        print(f"\n[2/2] Probing port {port}...")
+        endpoints = [
+            "/v1/models",
+            "/v1/chat/completions",
+            "/api/models",
+            "/",
+            "/health",
+        ]
+        for ep in endpoints:
+            try:
+                r = requests.get(
+                    f"http://localhost:{port}{ep}",
+                    timeout=3,
+                )
+                if r.status_code != 404:
+                    body = r.text[:100]
+                    print(
+                        f"  GET {ep} -> "
+                        f"{r.status_code}: {body}"
+                    )
+                    port_results[f"GET {ep}"] = {
+                        "status": r.status_code,
+                        "body": r.text[:200],
+                    }
+            except requests.ConnectionError:
+                pass
+            except requests.Timeout:
+                print(f"  GET {ep} -> timeout")
+        results[f"port_{port}"] = port_results
 
     return results
 
 
 def probe_extension_servers() -> list:
-    """Extract extension server info from running language_server processes.
+    """Extract extension server info from processes.
 
     Returns:
         list of dicts with extension server details.
@@ -152,53 +192,95 @@ def probe_extension_servers() -> list:
     banner("PHASE 3: Extension Server Probe")
     servers = []
 
-    result = subprocess.run(
-        ["ps", "aux"], capture_output=True, text=True, timeout=5
-    )
+    try:
+        result = subprocess.run(
+            ["ps", "aux"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        print(f"  Error listing processes: {e}")
+        return servers
+
     for line in result.stdout.split("\n"):
-        if "language_server" in line and "extension_server_port" in line:
-            args = line
-            port_match = re.search(r"--extension_server_port\s+(\d+)", args)
-            csrf_match = re.search(r"--csrf_token\s+(\S+)", args)
-            ext_csrf_match = re.search(r"--extension_server_csrf_token\s+(\S+)", args)
-            ws_match = re.search(r"--workspace_id\s+(\S+)", args)
-            endpoint_match = re.search(r"--cloud_code_endpoint\s+(\S+)", args)
+        if "language_server" not in line:
+            continue
+        if "extension_server_port" not in line:
+            continue
 
-            server = {
-                "extension_server_port": port_match.group(1) if port_match else None,
-                "csrf_token": csrf_match.group(1) if csrf_match else None,
-                "extension_csrf_token": ext_csrf_match.group(1) if ext_csrf_match else None,
-                "workspace_id": ws_match.group(1) if ws_match else None,
-                "cloud_endpoint": endpoint_match.group(1) if endpoint_match else None,
+        port_match = re.search(
+            r"--extension_server_port\s+(\d+)", line
+        )
+        csrf_match = re.search(
+            r"--csrf_token\s+(\S+)", line
+        )
+        ext_csrf_match = re.search(
+            r"--extension_server_csrf_token\s+(\S+)", line
+        )
+        ws_match = re.search(
+            r"--workspace_id\s+(\S+)", line
+        )
+        endpoint_match = re.search(
+            r"--cloud_code_endpoint\s+(\S+)", line
+        )
+
+        port = (
+            port_match.group(1) if port_match else None
+        )
+        ws = ws_match.group(1) if ws_match else None
+        server = {
+            "extension_server_port": port,
+            "csrf_token": (
+                csrf_match.group(1)
+                if csrf_match else None
+            ),
+            "extension_csrf_token": (
+                ext_csrf_match.group(1)
+                if ext_csrf_match else None
+            ),
+            "workspace_id": ws,
+            "cloud_endpoint": (
+                endpoint_match.group(1)
+                if endpoint_match else None
+            ),
+        }
+        servers.append(server)
+        print(f"  Server: port={port}, workspace={ws}")
+
+        # Try authenticated request
+        if not HAS_REQUESTS:
+            continue
+        if not (port and server["extension_csrf_token"]):
+            continue
+
+        csrf = server["extension_csrf_token"]
+        try:
+            r = requests.get(
+                f"http://localhost:{port}/",
+                headers={"X-CSRF-Token": csrf},
+                timeout=3,
+            )
+            print(
+                f"    GET / with ext CSRF -> "
+                f"{r.status_code}: {r.text[:80]}"
+            )
+            server["ext_csrf_response"] = {
+                "status": r.status_code,
+                "body": r.text[:200],
             }
-            servers.append(server)
-            print(f"  Server: port={server['extension_server_port']}, "
-                  f"workspace={server['workspace_id']}")
-
-            # Try authenticated request
-            if server["extension_server_port"] and server["extension_csrf_token"]:
-                try:
-                    import requests
-                    port = server["extension_server_port"]
-                    csrf = server["extension_csrf_token"]
-                    r = requests.get(
-                        f"http://localhost:{port}/",
-                        headers={"X-CSRF-Token": csrf},
-                        timeout=3
-                    )
-                    print(f"    GET / with ext CSRF -> {r.status_code}: {r.text[:100]}")
-                    server["ext_csrf_response"] = {
-                        "status": r.status_code,
-                        "body": r.text[:200],
-                    }
-                except Exception as e:
-                    print(f"    GET / failed: {e}")
+        except requests.ConnectionError:
+            print(f"    Connection refused on port {port}")
+        except requests.Timeout:
+            print(f"    Timeout on port {port}")
 
     return servers
 
 
-def probe_summary(cli_results: dict, port_results: dict, servers: list) -> str:
-    """Generate a summary of probe results with recommendations.
+def probe_summary(
+    cli_results: dict,
+    port_results: dict,
+    servers: list,
+) -> str:
+    """Generate a summary with recommendations.
 
     Args:
         cli_results: Results from CLI probe.
@@ -210,20 +292,23 @@ def probe_summary(cli_results: dict, port_results: dict, servers: list) -> str:
     """
     banner("SUMMARY & RECOMMENDATION")
 
-    lines = []
-    lines.append("CLI chat subcommand exists: "
-                  f"{'YES' if cli_results.get('chat_help', {}).get('has_modes') else 'NO'}")
-    lines.append(f"Listening ports: {port_results.get('listening_ports', [])}")
-    lines.append(f"Extension servers found: {len(servers)}")
-    lines.append(f"Version: {cli_results.get('version', 'unknown')}")
+    chat_help = cli_results.get("chat_help", {})
+    has_modes = chat_help.get("has_modes", False)
+    ports = port_results.get("listening_ports", [])
+    version = cli_results.get("version", "unknown")
 
-    # Determine best approach
-    lines.append("")
-    lines.append("RECOMMENDED APPROACH: CLI Wrapper Proxy (Approach A)")
-    lines.append("  - antigravity chat CLI is available with ask/edit/agent modes")
-    lines.append("  - Build Python HTTP server wrapping CLI calls")
-    lines.append("  - Expose as OpenAI-compatible /v1/chat/completions")
-    lines.append("  - Note: CLI opens GUI window, may need process management")
+    lines = [
+        f"CLI chat subcommand: {'YES' if has_modes else 'NO'}",
+        f"Listening ports: {ports}",
+        f"Extension servers found: {len(servers)}",
+        f"Version: {version}",
+        "",
+        "RECOMMENDED: CLI Wrapper Proxy (Approach A)",
+        "  - antigravity chat CLI available",
+        "  - Build Python HTTP server wrapping CLI",
+        "  - Expose as /v1/chat/completions",
+        "  - Note: CLI opens GUI, needs management",
+    ]
 
     summary = "\n".join(lines)
     print(summary)
@@ -234,6 +319,7 @@ if __name__ == "__main__":
     print("Antigravity Integration Probe")
     print(f"CLI path: {ANTIGRAVITY_CLI}")
     print(f"CLI exists: {os.path.exists(ANTIGRAVITY_CLI)}")
+    print(f"requests available: {HAS_REQUESTS}")
 
     if not os.path.exists(ANTIGRAVITY_CLI):
         print("ERROR: Antigravity CLI not found!")
@@ -242,7 +328,9 @@ if __name__ == "__main__":
     cli_results = probe_cli()
     port_results = probe_ports()
     servers = probe_extension_servers()
-    summary = probe_summary(cli_results, port_results, servers)
+    summary = probe_summary(
+        cli_results, port_results, servers
+    )
 
     # Save results
     results = {
@@ -252,6 +340,7 @@ if __name__ == "__main__":
         "extension_servers": servers,
         "summary": summary,
     }
-    with open("probe_results.json", "w") as f:
+    output_file = "probe_results.json"
+    with open(output_file, "w") as f:
         json.dump(results, f, indent=2, default=str)
-    print(f"\nResults saved to probe_results.json")
+    print(f"\nResults saved to {output_file}")
