@@ -27,9 +27,7 @@ import shutil
 ANTIGRAVITY_CLI = os.path.expanduser(
     "~/.antigravity/antigravity/bin/antigravity"
 )
-GEMINI_CLI = shutil.which("gemini") or os.path.expanduser(
-    "~/.nvm/versions/node/v22.22.0/bin/gemini"
-)
+GEMINI_CLI = shutil.which("gemini")
 DEFAULT_PORT = 8462
 MODEL_NAME = "claude-opus-4-6"
 MODEL_DISPLAY = (
@@ -552,47 +550,51 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Auto-detect backend
-    gemini_ok = (
-        GEMINI_CLI and os.path.exists(GEMINI_CLI)
-    )
-    antigravity_ok = os.path.exists(ANTIGRAVITY_CLI)
+    # Backend availability map
+    backends = {
+        "gemini": {
+            "ok": bool(
+                GEMINI_CLI
+                and os.path.exists(GEMINI_CLI)
+            ),
+            "cli": GEMINI_CLI,
+        },
+        "antigravity": {
+            "ok": os.path.exists(ANTIGRAVITY_CLI),
+            "cli": ANTIGRAVITY_CLI,
+        },
+    }
 
+    # Select backend
     if args.backend == "auto":
-        if gemini_ok:
-            ACTIVE_BACKEND = "gemini"
-        elif antigravity_ok:
-            ACTIVE_BACKEND = "antigravity"
-        else:
+        chosen = next(
+            (
+                name for name, info
+                in backends.items() if info["ok"]
+            ),
+            None,
+        )
+        if not chosen:
             logger.error(
                 "No backend CLI found. Install "
                 "@google/gemini-cli or Antigravity."
             )
             sys.exit(1)
-    elif args.backend == "gemini":
-        if not gemini_ok:
-            logger.error(
-                "Gemini CLI not found at %s",
-                GEMINI_CLI,
-            )
-            sys.exit(1)
-        ACTIVE_BACKEND = "gemini"
-    elif args.backend == "antigravity":
-        if not antigravity_ok:
-            logger.error(
-                "Antigravity CLI not found at %s",
-                ANTIGRAVITY_CLI,
-            )
-            sys.exit(1)
-        ACTIVE_BACKEND = "antigravity"
-
-    logger.info(
-        "Backend: %s", ACTIVE_BACKEND,
-    )
-    if ACTIVE_BACKEND == "gemini":
-        logger.info("  CLI: %s", GEMINI_CLI)
+        ACTIVE_BACKEND = chosen
     else:
-        logger.info("  CLI: %s", ANTIGRAVITY_CLI)
+        info = backends[args.backend]
+        if not info["ok"]:
+            logger.error(
+                "%s CLI not found at %s",
+                args.backend, info["cli"],
+            )
+            sys.exit(1)
+        ACTIVE_BACKEND = args.backend
+
+    cli_path = backends[ACTIVE_BACKEND]["cli"]
+    logger.info(
+        "Backend: %s (%s)", ACTIVE_BACKEND, cli_path,
+    )
 
     # Check for running extension servers
     servers = find_extension_servers()
