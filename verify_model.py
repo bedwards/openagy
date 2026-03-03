@@ -17,6 +17,12 @@ import shutil
 import sys
 import os
 import json
+import argparse
+
+DEFAULT_PROMPT = (
+    "What model are you? State your exact "
+    "model ID and version."
+)
 
 
 def find_gemini_cli() -> str:
@@ -125,19 +131,21 @@ def print_model_report(data: dict) -> None:
 
 def main() -> None:
     """Run model verification."""
-    prompt = (
-        sys.argv[1]
-        if len(sys.argv) > 1
-        else "What model are you? State your exact "
-        "model ID and version."
+    parser = argparse.ArgumentParser(
+        description="Verify which model Gemini CLI uses"
     )
+    parser.add_argument(
+        "prompt", nargs="?", default=DEFAULT_PROMPT,
+        help="Custom prompt to send",
+    )
+    args = parser.parse_args()
 
     cli = find_gemini_cli()
     print(f"CLI: {cli}")
-    print(f"Prompt: {prompt}")
+    print(f"Prompt: {args.prompt}")
     print()
 
-    data = call_gemini(cli, prompt)
+    data = call_gemini(cli, args.prompt)
     print_model_report(data)
 
 
