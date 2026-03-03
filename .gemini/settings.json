@@ -1,0 +1,6 @@
+{
+  "review": {
+    "auto": true,
+    "comment_severity_threshold": "low"
+  }
+}
