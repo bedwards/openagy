@@ -194,11 +194,45 @@ class AntigravityProxy(BaseHTTPRequestHandler):
             self._respond_json(404, {"error": "not found"})
             return
 
-        length = int(
-            self.headers.get("Content-Length", 0)
-        )
-        body = json.loads(self.rfile.read(length))
+        # Validate Content-Length
+        raw_length = self.headers.get("Content-Length")
+        if not raw_length:
+            self._respond_json(400, {
+                "error": "Missing Content-Length header",
+            })
+            return
+
+        try:
+            length = int(raw_length)
+        except ValueError:
+            self._respond_json(400, {
+                "error": "Invalid Content-Length",
+            })
+            return
+
+        # Parse JSON body
+        try:
+            raw = self.rfile.read(length)
+            body = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            self._respond_json(400, {
+                "error": f"Invalid JSON: {e}",
+            })
+            return
+
+        if not isinstance(body, dict):
+            self._respond_json(400, {
+                "error": "Request body must be object",
+            })
+            return
+
         messages = body.get("messages", [])
+        if not messages:
+            self._respond_json(400, {
+                "error": "messages array is required",
+            })
+            return
+
         stream = body.get("stream", False)
         prompt = self._messages_to_prompt(messages)
 
@@ -258,6 +292,18 @@ class AntigravityProxy(BaseHTTPRequestHandler):
             prompt: The formatted prompt.
         """
         response_text = call_antigravity_cli(prompt)
+
+        # Check for CLI errors
+        if response_text.startswith("Error:"):
+            self._respond_json(502, {
+                "error": {
+                    "message": response_text,
+                    "type": "upstream_error",
+                    "code": "cli_error",
+                },
+            })
+            return
+
         prompt_tokens = len(prompt.split())
         completion_tokens = len(response_text.split())
         self._respond_json(200, {

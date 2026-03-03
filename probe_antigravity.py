@@ -229,30 +229,34 @@ def probe_extension_servers() -> list:
         ws = ws_match.group(1) if ws_match else None
         server = {
             "extension_server_port": port,
-            "csrf_token": (
-                csrf_match.group(1)
-                if csrf_match else None
-            ),
-            "extension_csrf_token": (
-                ext_csrf_match.group(1)
-                if ext_csrf_match else None
-            ),
+            "csrf_token": "[REDACTED]",
+            "extension_csrf_token": "[REDACTED]",
             "workspace_id": ws,
             "cloud_endpoint": (
                 endpoint_match.group(1)
                 if endpoint_match else None
             ),
         }
+        # Keep raw tokens in memory for probing
+        # but never write them to disk
+        _raw_csrf = (
+            csrf_match.group(1)
+            if csrf_match else None
+        )
+        _raw_ext_csrf = (
+            ext_csrf_match.group(1)
+            if ext_csrf_match else None
+        )
         servers.append(server)
         print(f"  Server: port={port}, workspace={ws}")
 
         # Try authenticated request
         if not HAS_REQUESTS:
             continue
-        if not (port and server["extension_csrf_token"]):
+        if not (port and _raw_ext_csrf):
             continue
 
-        csrf = server["extension_csrf_token"]
+        csrf = _raw_ext_csrf
         try:
             r = requests.get(
                 f"http://localhost:{port}/",
