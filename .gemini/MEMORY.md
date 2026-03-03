@@ -27,6 +27,15 @@
 - Gemini Code Assist: installed, "All repositories", no API key needed
 - Workflow: feature branches → PRs → Gemini review → merge
 
+## Development Workflow (STRICT)
+1. **Feature branches** for all changes (never commit directly to main)
+2. **Gemini Code Assist reviews** every PR — react to ALL feedback before merge
+3. **PR checks MUST be green** before merge — no exceptions
+4. **Main branch MUST stay green** after every merge
+5. **Frequent commits** with descriptive messages
+6. **Unit tests** required — CI runs pytest + linting on every PR
+7. **Squash-merge** PRs for clean history
+
 ## Integration Approaches (priority order)
 1. **Approach A**: CLI wrapper proxy (most reliable, `antigravity chat` is documented)
 2. **Approach B**: Direct extension server (fragile, CSRF token rotation)

@@ -210,9 +210,6 @@ def probe_extension_servers() -> list:
         port_match = re.search(
             r"--extension_server_port\s+(\d+)", line
         )
-        csrf_match = re.search(
-            r"--csrf_token\s+(\S+)", line
-        )
         ext_csrf_match = re.search(
             r"--extension_server_csrf_token\s+(\S+)", line
         )
@@ -237,12 +234,8 @@ def probe_extension_servers() -> list:
                 if endpoint_match else None
             ),
         }
-        # Keep raw tokens in memory for probing
-        # but never write them to disk
-        _raw_csrf = (
-            csrf_match.group(1)
-            if csrf_match else None
-        )
+        # Keep raw ext CSRF token in memory for probing
+        # but never write it to disk
         _raw_ext_csrf = (
             ext_csrf_match.group(1)
             if ext_csrf_match else None
